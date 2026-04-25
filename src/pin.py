@@ -62,25 +62,25 @@ def main():
     signal.signal(signal.SIGINT, _sig)
 
     iterations = args.loops if args.loops > 0 else 10**9
-    park = args.park_row if args.park_row > 0 and args.park_row < 999 else 999
-    park_seq = ESC + f"[{park};1H".encode()
     try:
         for _ in range(iterations):
             for fr in frames:
                 if stop["v"]:
                     raise KeyboardInterrupt
                 lines = fr.split(b"\n")
-                # Paint absolute. Do NOT use DECSC/DECRC: a concurrent writer
-                # (log pipe) may have moved the cursor between our save and
-                # restore, and konsole/xterm restore literally — clobbering
-                # the log's column. Instead, after painting we park the
-                # cursor at the bottom-left so log writes scroll naturally.
+                # One atomic write per frame: save cursor (DECSC), paint each
+                # row at its absolute (row, col), reset attrs, restore cursor
+                # (DECRC). Because the whole frame is a single write+flush,
+                # other processes writing to the tty cannot interleave between
+                # our save and restore. The foreground always keeps full
+                # control of the cursor.
                 buf = bytearray()
+                buf += ESC + b"7"
                 for i, line in enumerate(lines):
                     buf += ESC + f"[{args.row + i};{args.col}H".encode()
                     buf += line
-                    buf += ESC + b"[0m"
-                buf += park_seq
+                buf += ESC + b"[0m"
+                buf += ESC + b"8"
                 try:
                     out.write(bytes(buf))
                     out.flush()
