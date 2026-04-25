@@ -1,0 +1,44 @@
+#!/bin/bash
+set -e
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+find_rock() {
+    if command -v rock >/dev/null 2>&1; then command -v rock; return 0; fi
+    for c in "$HOME/Downloads/rk/rockc/target/release/rock" "$HOME/.local/bin/rock" "/usr/local/bin/rock"; do
+        [ -x "$c" ] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    render)
+        exec python3 "$ROOT/src/render.py" "$@"
+        ;;
+    play|loop|info)
+        ROCK="$(find_rock || true)"
+        if [ -z "$ROCK" ]; then
+            echo "rock interpreter not found" >&2
+            exit 1
+        fi
+        exec "$ROCK" run "$ROOT/src/play.rk" -- "$cmd" "$@"
+        ;;
+    help|--help|-h|"")
+        cat <<EOF
+zzz — animated colored ASCII renderer for the terminal
+
+usage:
+  zzz render <input.gif> <output.zzz> [-w 90] [-H 36] [-t 60] [--keep-bg]
+  zzz play   <file.zzz> [loops] [fps]
+  zzz loop   <file.zzz>
+  zzz info   <file.zzz>
+EOF
+        ;;
+    *)
+        echo "unknown command: $cmd" >&2
+        exit 1
+        ;;
+esac

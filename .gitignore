@@ -1,0 +1,6 @@
+examples/*.zzz
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.idea/
