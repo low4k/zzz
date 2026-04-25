@@ -1,4 +1,5 @@
 let ESC = hex.decode("1b") + "["
+let RS  = hex.decode("1e")
 
 fn arg(args, i, dflt) {
     if len(args) > i { args[i] } else { dflt }
@@ -6,6 +7,7 @@ fn arg(args, i, dflt) {
 
 fn read_zzz(path) {
     let raw = read_file(path)
+    if raw == nil { panic("could not read: " + path) }
     let lines = strs.split(raw, "\n")
     if len(lines) < 2 { panic("not a .zzz file") }
     if lines[0] != "ZZZ1" { panic("bad magic: " + lines[0]) }
@@ -17,11 +19,11 @@ fn read_zzz(path) {
     let mut i = 2
     while i < len(lines) {
         let line = lines[i]
-        if line == hex.decode("1e") + "FRAME" {
+        if line == RS + "FRAME" {
             if in_frame { push(frames, buf) }
             buf = ""
             in_frame = true
-        } else if line == hex.decode("1e") + "END" {
+        } else if line == RS + "END" {
             if in_frame { push(frames, buf); in_frame = false }
         } else if in_frame {
             if buf == "" { buf = line } else { buf = buf + "\n" + line }
@@ -53,8 +55,7 @@ fn play(path, loops, fps_override) {
     while iter < total_loops {
         let mut k = 0
         while k < len(frames) {
-            print(ESC + "H")
-            print(frames[k])
+            print(ESC + "H" + frames[k])
             time.sleep_ms(delay)
             k += 1
         }
@@ -63,6 +64,45 @@ fn play(path, loops, fps_override) {
 
     print(ESC + "?25h")
     print(ESC + "0m")
+}
+
+fn pin(path, row, col, loops, fps_override) {
+    let doc    = read_zzz(path)
+    let header = doc["header"]
+    let frames = doc["frames"]
+
+    let fps = if fps_override > 0 { fps_override } else { header["fps"] }
+    let delay = if fps > 0 { 1000 / fps } else { 80 }
+
+    let HIDE = ESC + "?25l"
+    let SHOW = ESC + "?25h"
+
+    print(HIDE)
+
+    let total_loops = if loops <= 0 { 9999 } else { loops }
+    let mut iter = 0
+    while iter < total_loops {
+        let mut k = 0
+        while k < len(frames) {
+            let lines = strs.split(frames[k], "\n")
+            let mut buf = HIDE
+            let mut i = 0
+            while i < len(lines) {
+                let r = row + i
+                buf = buf + ESC + str(r) + ";" + str(col) + "H" + lines[i]
+                i += 1
+            }
+            // park cursor inside the anim strip (outside any scroll region) so
+            // the implicit '\n' from print/println does not scroll the log area.
+            buf = buf + ESC + "0m" + ESC + str(row) + ";1H"
+            print(buf)
+            time.sleep_ms(delay)
+            k += 1
+        }
+        iter += 1
+    }
+
+    print(SHOW)
 }
 
 fn show_info(path) {
@@ -90,11 +130,19 @@ fn main() {
         let path = arg(a, 5, "")
         if path == "" { print("usage: loop <file.zzz>"); return }
         play(path, 0, 0)
+    } else if cmd == "pin" {
+        let path = arg(a, 5, "")
+        if path == "" { print("usage: pin <file.zzz> <row> <col> [loops] [fps]"); return }
+        let row   = parse_int_default(arg(a, 6, "1"), 1)
+        let col   = parse_int_default(arg(a, 7, "1"), 1)
+        let loops = parse_int_default(arg(a, 8, "0"), 0)
+        let fps   = parse_int_default(arg(a, 9, "0"), 0)
+        pin(path, row, col, loops, fps)
     } else if cmd == "info" {
         let path = arg(a, 5, "")
         if path == "" { print("usage: info <file.zzz>"); return }
         show_info(path)
     } else {
-        print("usage: zzz play|loop|info <file.zzz> [loops] [fps]")
+        print("usage: zzz play|loop|pin|info <file.zzz>")
     }
 }

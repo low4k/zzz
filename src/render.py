@@ -2,107 +2,118 @@
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from PIL import Image, ImageSequence
 
-CHARS = " .'`,:;-~+*=oxOX#%@$"
 DEFAULT_W = 90
 DEFAULT_H = 36
 
-def luma(r, g, b):
-    return (0.299 * r + 0.587 * g + 0.114 * b)
+UPPER = "\u2580"
+LOWER = "\u2584"
 
-def char_for(brightness):
-    n = len(CHARS) - 1
-    idx = int(round(brightness / 255.0 * n))
-    if idx < 0: idx = 0
-    if idx > n: idx = n
-    return CHARS[idx]
-
-def sample_bg(img):
+def detect_bg(img):
+    img = img.convert("RGB")
     w, h = img.size
-    pts = [(0,0),(w-1,0),(0,h-1),(w-1,h-1),
-           (w//2,0),(w//2,h-1),(0,h//2),(w-1,h//2)]
-    rs, gs, bs = [], [], []
-    for x, y in pts:
-        px = img.getpixel((x, y))
-        if len(px) == 4:
-            r, g, b, a = px
-            if a < 16: continue
-        else:
-            r, g, b = px[:3]
-        rs.append(r); gs.append(g); bs.append(b)
-    if not rs: return None
-    return (sum(rs)//len(rs), sum(gs)//len(gs), sum(bs)//len(bs))
+    px = img.load()
+    samples = []
+    band = max(1, min(w, h) // 12)
+    for x in range(w):
+        for y in list(range(band)) + list(range(h - band, h)):
+            samples.append(px[x, y])
+    for y in range(h):
+        for x in list(range(band)) + list(range(w - band, w)):
+            samples.append(px[x, y])
+    bucketed = [(r >> 5 << 5, g >> 5 << 5, b >> 5 << 5) for r, g, b in samples]
+    cluster = Counter(bucketed).most_common(1)[0][0]
+    matching = [s for s, b in zip(samples, bucketed) if b == cluster]
+    n = len(matching) or 1
+    return (
+        sum(p[0] for p in matching) // n,
+        sum(p[1] for p in matching) // n,
+        sum(p[2] for p in matching) // n,
+    )
 
 def is_bg(px, bg, tol):
-    if bg is None: return False
-    if len(px) == 4 and px[3] < 24: return True
+    if len(px) == 4 and px[3] < 32:
+        return True
+    if bg is None:
+        return False
     r, g, b = px[:3]
-    br, bg_, bb = bg
-    d = abs(r-br) + abs(g-bg_) + abs(b-bb)
-    return d < tol
+    br, bgr, bb = bg
+    return abs(r - br) + abs(g - bgr) + abs(b - bb) < tol
 
-def render_frame(frame, target_w, target_h, bg, tol, no_bg):
+def fit(iw, ih, max_w, max_h):
+    aspect = iw / ih
+    out_w = max_w
+    out_h = max(1, round(max_w / aspect / 2))
+    if out_h > max_h:
+        out_h = max_h
+        out_w = max(1, round(max_h * 2 * aspect))
+    if out_w > max_w:
+        out_w = max_w
+    return out_w, out_h
+
+def render_frame(frame, max_w, max_h, bg, tol, no_bg):
     img = frame.convert("RGBA")
     iw, ih = img.size
-    aspect = iw / ih
-    cell = aspect / 0.5
-    out_w = target_w
-    out_h = int(target_w / cell)
-    if out_h > target_h:
-        out_h = target_h
-        out_w = int(out_h * cell)
-    img = img.resize((out_w, out_h), Image.LANCZOS)
+    cw, ch = fit(iw, ih, max_w, max_h)
+    img = img.resize((cw, ch * 2), Image.LANCZOS)
+    px = img.load()
 
-    rows = []
-    for y in range(out_h):
-        cells = []
-        prev = None
-        run = []
-        for x in range(out_w):
-            px = img.getpixel((x, y))
-            if no_bg and is_bg(px, bg, tol):
-                if prev is not None:
-                    cells.append((prev, "".join(run)))
-                    prev, run = None, []
-                cells.append((None, " "))
+    lines = []
+    for cy in range(ch):
+        parts = []
+        last_fg = None
+        last_bg = None
+        for cx in range(cw):
+            top = px[cx, cy * 2]
+            bot = px[cx, cy * 2 + 1]
+            top_t = no_bg and is_bg(top, bg, tol)
+            bot_t = no_bg and is_bg(bot, bg, tol)
+
+            if top_t and bot_t:
+                if last_fg is not None or last_bg is not None:
+                    parts.append("\x1b[0m")
+                    last_fg = None
+                    last_bg = None
+                parts.append(" ")
                 continue
-            r, g, b = px[:3]
-            ch = char_for(luma(r, g, b))
-            key = (r, g, b)
-            if key == prev:
-                run.append(ch)
-            else:
-                if prev is not None:
-                    cells.append((prev, "".join(run)))
-                prev, run = key, [ch]
-        if prev is not None:
-            cells.append((prev, "".join(run)))
-        rows.append(cells)
-    return rows
 
-def encode_frame(rows):
-    ESC = "\x1b["
-    RESET = ESC + "0m"
-    parts = []
-    for cells in rows:
-        line = []
-        last = None
-        for color, text in cells:
-            if color is None:
-                if last is not None:
-                    line.append(RESET); last = None
-                line.append(text)
+            if top_t:
+                fg = bot[:3]
+                if last_bg is not None:
+                    parts.append("\x1b[49m")
+                    last_bg = None
+                if fg != last_fg:
+                    parts.append(f"\x1b[38;2;{fg[0]};{fg[1]};{fg[2]}m")
+                    last_fg = fg
+                parts.append(LOWER)
+            elif bot_t:
+                fg = top[:3]
+                if last_bg is not None:
+                    parts.append("\x1b[49m")
+                    last_bg = None
+                if fg != last_fg:
+                    parts.append(f"\x1b[38;2;{fg[0]};{fg[1]};{fg[2]}m")
+                    last_fg = fg
+                parts.append(UPPER)
             else:
-                if color != last:
-                    r, g, b = color
-                    line.append(f"{ESC}38;2;{r};{g};{b}m"); last = color
-                line.append(text)
-        if last is not None:
-            line.append(RESET)
-        parts.append("".join(line))
-    return "\n".join(parts)
+                fg = top[:3]
+                bc = bot[:3]
+                changes = []
+                if fg != last_fg:
+                    changes.append(f"38;2;{fg[0]};{fg[1]};{fg[2]}")
+                    last_fg = fg
+                if bc != last_bg:
+                    changes.append(f"48;2;{bc[0]};{bc[1]};{bc[2]}")
+                    last_bg = bc
+                if changes:
+                    parts.append("\x1b[" + ";".join(changes) + "m")
+                parts.append(UPPER)
+        parts.append("\x1b[0m")
+        lines.append("".join(parts))
+    return lines
 
 def gif_frames(path):
     im = Image.open(path)
@@ -119,37 +130,42 @@ def main():
     ap.add_argument("output")
     ap.add_argument("-w", "--width", type=int, default=DEFAULT_W)
     ap.add_argument("-H", "--height", type=int, default=DEFAULT_H)
-    ap.add_argument("-t", "--tol", type=int, default=60)
+    ap.add_argument("-t", "--tol", type=int, default=180)
     ap.add_argument("--keep-bg", action="store_true")
     ap.add_argument("--bg", default=None)
     args = ap.parse_args()
 
     src = Path(args.input)
     if not src.exists():
-        print(f"missing: {src}", file=sys.stderr); sys.exit(1)
+        print(f"missing: {src}", file=sys.stderr)
+        sys.exit(1)
 
     frames, delays = gif_frames(src)
     if not frames:
-        print("no frames", file=sys.stderr); sys.exit(1)
+        print("no frames", file=sys.stderr)
+        sys.exit(1)
 
     if args.bg:
         bg = tuple(int(x) for x in args.bg.split(","))
     else:
-        bg = sample_bg(frames[0].convert("RGBA"))
+        bg = detect_bg(frames[0])
 
     encoded = []
+    real_h = 0
     for f in frames:
-        rows = render_frame(f, args.width, args.height, bg, args.tol, not args.keep_bg)
-        encoded.append(encode_frame(rows))
+        lines = render_frame(f, args.width, args.height, bg, args.tol, not args.keep_bg)
+        real_h = max(real_h, len(lines))
+        encoded.append("\n".join(lines))
 
     avg_delay = sum(delays) / len(delays)
     fps = max(1, round(1000.0 / max(20, avg_delay)))
 
     header = {
-        "v": 1,
+        "v": 2,
         "src": src.name,
         "w": args.width,
         "h": args.height,
+        "rh": real_h,
         "fps": fps,
         "frames": len(encoded),
         "delays_ms": delays,
@@ -159,12 +175,12 @@ def main():
     with open(args.output, "w", encoding="utf-8") as out:
         out.write("ZZZ1\n")
         out.write(json.dumps(header) + "\n")
-        for i, fr in enumerate(encoded):
+        for fr in encoded:
             out.write("\x1eFRAME\n")
             out.write(fr)
             out.write("\n")
         out.write("\x1eEND\n")
-    print(f"wrote {args.output}  ({len(encoded)} frames, ~{fps} fps)")
+    print(f"wrote {args.output}  ({len(encoded)} frames, ~{fps} fps, {real_h} rows)")
 
 if __name__ == "__main__":
     main()

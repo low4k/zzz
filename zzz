@@ -18,6 +18,9 @@ case "$cmd" in
     render)
         exec python3 "$ROOT/src/render.py" "$@"
         ;;
+    pin)
+        exec python3 "$ROOT/src/pin.py" "$@"
+        ;;
     play|loop|info)
         ROCK="$(find_rock || true)"
         if [ -z "$ROCK" ]; then
@@ -34,6 +37,7 @@ usage:
   zzz render <input.gif> <output.zzz> [-w 90] [-H 36] [-t 60] [--keep-bg]
   zzz play   <file.zzz> [loops] [fps]
   zzz loop   <file.zzz>
+  zzz pin    <file.zzz> <row> <col> [loops] [fps]
   zzz info   <file.zzz>
 EOF
         ;;
